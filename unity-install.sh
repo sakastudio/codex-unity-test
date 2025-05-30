@@ -2,35 +2,40 @@
 set -euo pipefail
 
 # ────────────────────────────────────────────────────────────────
-# 1) 必須環境変数の確認
+# 0) ユーザー設定：必須／任意環境変数
 # ────────────────────────────────────────────────────────────────
 : "${UNITY_EMAIL:?Error: UNITY_EMAIL is not set}"
 : "${UNITY_PASSWORD:?Error: UNITY_PASSWORD is not set}"
 : "${UNITY_VERSION:?Error: UNITY_VERSION is not set}"
 
-# 任意設定
 UNITY_MODULES=${UNITY_MODULES:-""}          # 例: "android webgl"
 UNITY_SERIAL=${UNITY_SERIAL:-""}            # Pro/Plus シリアル (Personal は空で OK)
 UNITY_INSTALL_PATH=${UNITY_INSTALL_PATH:-"/opt/unity"}
 
+# ★ MITM プロキシ等でルート証明書を追加したい場合はパスを渡す
+MITM_CA_PATH=${MITM_CA_PATH:-""}            # 例: "./corp-root-ca.pem"
+
 # ────────────────────────────────────────────────────────────────
-# 2) 依存パッケージと Unity Hub のインストール
-#    （Hub が未インストールの場合のみ）
+# 1) 依存パッケージ + Unity Hub のインストール
 # ────────────────────────────────────────────────────────────────
+echo ">> Installing runtime dependencies & Unity Hub ..."
+
+sudo apt-get update
+
+# ★ GTK と ALSA は Ubuntu 24.04 以降で t64 名に変更されたので動的判定
+if apt-cache show libgtk-3-0 >/dev/null 2>&1; then GTK_PKG=libgtk-3-0; else GTK_PKG=libgtk-3-0t64; fi
+if apt-cache show libasound2 >/dev/null 2>&1; then ALSA_PKG=libasound2; else ALSA_PKG=libasound2t64; fi
+
+sudo apt-get install -y wget gpg ca-certificates libnss3 xvfb dbus-user-session \
+                        "$GTK_PKG" "$ALSA_PKG"
+
+# Unity Hub が未インストールならリポジトリ追加 → インストール
 if ! command -v unityhub &>/dev/null; then
-  echo ">> Installing Unity Hub and runtime deps ..."
-  sudo apt-get update
-  sudo apt-get install -y wget gpg ca-certificates libnss3 xvfb \
-       libgtk-3-0 || sudo apt-get install -y libgtk-3-0t64
-
-  sudo apt-get install -y libasound2 || sudo apt-get install -y libasound2t64
-
-  # GPG キー & リポジトリ定義
   wget -qO - https://hub.unity3d.com/linux/keys/public \
-    | gpg --dearmor \
-    | sudo tee /usr/share/keyrings/Unity_Technologies_ApS.gpg >/dev/null
+      | gpg --dearmor \
+      | sudo tee /usr/share/keyrings/Unity_Technologies_ApS.gpg >/dev/null
 
-  cat <<'EOF' | sudo tee /etc/apt/sources.list.d/unityhub.sources >/dev/null
+  sudo tee /etc/apt/sources.list.d/unityhub.sources >/dev/null <<'EOF'
 Types: deb
 URIs: https://hub.unity3d.com/linux/repos/deb
 Suites: stable
@@ -43,30 +48,40 @@ EOF
 fi
 
 # ────────────────────────────────────────────────────────────────
-# 3) EULA 自動同意 (GUI が無い環境向け)
+# 2) 追加 CA 証明書 (MITM / 社内プロキシ向け) ★
+# ────────────────────────────────────────────────────────────────
+if [[ -n "$MITM_CA_PATH" && -f "$MITM_CA_PATH" ]]; then
+  echo ">> Installing custom root CA: $MITM_CA_PATH"
+  sudo cp "$MITM_CA_PATH" "/usr/local/share/ca-certificates/$(basename "$MITM_CA_PATH").crt"
+  sudo update-ca-certificates
+  export NODE_EXTRA_CA_CERTS="/usr/local/share/ca-certificates/$(basename "$MITM_CA_PATH").crt"
+fi
+
+# ────────────────────────────────────────────────────────────────
+# 3) Unity Hub の EULA 同意を書き込み
 # ────────────────────────────────────────────────────────────────
 mkdir -p "$HOME/.config/Unity Hub"
 echo '{"accepted":[{"version":"3"}]}' >"$HOME/.config/Unity Hub/eulaAccepted"
 
 # ────────────────────────────────────────────────────────────────
-# 4) 指定バージョンの Unity Editor をインストール
-#    Hub CLI (headless) を xvfb でラップ
+# 4) Unity Editor のインストール (xvfb + D-Bus ラップ) ★
 # ────────────────────────────────────────────────────────────────
 echo ">> Installing Unity Editor $UNITY_VERSION ..."
 
-# ★ GPU 無しでも起動するよう Electron に指示
-export ELECTRON_DISABLE_GPU=true
+export ELECTRON_DISABLE_GPU=true   # GPU が無い VM でもソフトレンダに
 
-# ★ xvfb-run で仮想ディスプレイを用意して Hub を起動
+run_hub() {
+  dbus-run-session -- \
+    xvfb-run --auto-servernum --server-args='-screen 0 1280x720x24' \
+    unityhub "$@"
+}
+
 args=(--headless install --version "$UNITY_VERSION")
 if [[ -n "$UNITY_MODULES" ]]; then
-  for m in $UNITY_MODULES; do
-    args+=( -m "$m" )
-  done
+  for m in $UNITY_MODULES; do args+=( -m "$m" ); done
 fi
-xvfb-run --auto-servernum \
-         --server-args='-screen 0 1280x720x24' \
-         unityhub "${args[@]}"
+
+run_hub "${args[@]}"
 
 # ────────────────────────────────────────────────────────────────
 # 5) (オプション) ライセンス自動アクティベーション
@@ -76,7 +91,8 @@ if [[ -n "$UNITY_SERIAL" ]]; then
   [[ -x $EDITOR ]] || EDITOR="$UNITY_INSTALL_PATH/Hub/Editor/$UNITY_VERSION/Editor/Unity"
   if [[ -x $EDITOR ]]; then
     echo ">> Activating license ..."
-    xvfb-run --auto-servernum "$EDITOR" -quit -batchmode -nographics \
+    dbus-run-session -- xvfb-run --auto-servernum \
+      "$EDITOR" -quit -batchmode -nographics \
       -serial "$UNITY_SERIAL" \
       -username "$UNITY_EMAIL" \
       -password "$UNITY_PASSWORD" || true
