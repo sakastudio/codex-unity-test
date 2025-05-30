@@ -10,19 +10,22 @@ set -euo pipefail
 
 # 任意設定
 UNITY_MODULES=${UNITY_MODULES:-""}          # 例: "android webgl"
-UNITY_SERIAL=${UNITY_SERIAL:-""}            # Pro/Plus シリアル (Personal なら空で OK)
+UNITY_SERIAL=${UNITY_SERIAL:-""}            # Pro/Plus シリアル (Personal は空で OK)
 UNITY_INSTALL_PATH=${UNITY_INSTALL_PATH:-"/opt/unity"}
 
 # ────────────────────────────────────────────────────────────────
-# 2) Unity Hub のインストール（未インストールの場合のみ）
-#    公式 apt リポジトリを登録し、unityhub パッケージを導入
+# 2) 依存パッケージと Unity Hub のインストール
+#    （Hub が未インストールの場合のみ）
 # ────────────────────────────────────────────────────────────────
 if ! command -v unityhub &>/dev/null; then
-  echo ">> Installing Unity Hub ..."
+  echo ">> Installing Unity Hub and runtime deps ..."
   sudo apt-get update
-  sudo apt-get install -y wget gpg ca-certificates
+  # ★ Electron が動く最低限のライブラリ + xvfb
+  sudo apt-get install -y wget gpg ca-certificates \
+                          libgtk-3-0 libnss3 libasound2 \
+                          xvfb
 
-  # GPG キー & リポジトリ定義（Ubuntu 22.04/24.04 以降の deb822 形式）
+  # GPG キー & リポジトリ定義
   wget -qO - https://hub.unity3d.com/linux/keys/public \
     | gpg --dearmor \
     | sudo tee /usr/share/keyrings/Unity_Technologies_ApS.gpg >/dev/null
@@ -47,28 +50,33 @@ echo '{"accepted":[{"version":"3"}]}' >"$HOME/.config/Unity Hub/eulaAccepted"
 
 # ────────────────────────────────────────────────────────────────
 # 4) 指定バージョンの Unity Editor をインストール
-#    Unity Hub CLI (headless) を利用
+#    Hub CLI (headless) を xvfb でラップ
 # ────────────────────────────────────────────────────────────────
 echo ">> Installing Unity Editor $UNITY_VERSION ..."
+
+# ★ GPU 無しでも起動するよう Electron に指示
+export ELECTRON_DISABLE_GPU=true
+
+# ★ xvfb-run で仮想ディスプレイを用意して Hub を起動
 args=(--headless install --version "$UNITY_VERSION")
 if [[ -n "$UNITY_MODULES" ]]; then
   for m in $UNITY_MODULES; do
     args+=( -m "$m" )
   done
 fi
-unityhub "${args[@]}"
+xvfb-run --auto-servernum \
+         --server-args='-screen 0 1280x720x24' \
+         unityhub "${args[@]}"
 
 # ────────────────────────────────────────────────────────────────
 # 5) (オプション) ライセンス自動アクティベーション
-#    Personal 版はシリアルが無いのでスキップしてください
 # ────────────────────────────────────────────────────────────────
 if [[ -n "$UNITY_SERIAL" ]]; then
-  # Editor 実行ファイルのパス (Hub の既定配置を想定)
   EDITOR="$HOME/Unity/Hub/Editor/$UNITY_VERSION/Editor/Unity"
   [[ -x $EDITOR ]] || EDITOR="$UNITY_INSTALL_PATH/Hub/Editor/$UNITY_VERSION/Editor/Unity"
   if [[ -x $EDITOR ]]; then
     echo ">> Activating license ..."
-    "$EDITOR" -quit -batchmode -nographics \
+    xvfb-run --auto-servernum "$EDITOR" -quit -batchmode -nographics \
       -serial "$UNITY_SERIAL" \
       -username "$UNITY_EMAIL" \
       -password "$UNITY_PASSWORD" || true
@@ -80,4 +88,3 @@ else
 fi
 
 echo "✅ Unity $UNITY_VERSION installation finished."
-
