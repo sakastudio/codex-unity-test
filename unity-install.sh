@@ -20,10 +20,10 @@ UNITY_INSTALL_PATH=${UNITY_INSTALL_PATH:-"/opt/unity"}
 if ! command -v unityhub &>/dev/null; then
   echo ">> Installing Unity Hub and runtime deps ..."
   sudo apt-get update
-  # ★ Electron が動く最低限のライブラリ + xvfb
-  sudo apt-get install -y wget gpg ca-certificates \
-                          libgtk-3-0t64 libnss3 liboss4-salsa-asound2 4.2-build2020-1ubuntu3 \
-                          xvfb
+  sudo apt-get install -y wget gpg ca-certificates libnss3 xvfb \
+       libgtk-3-0 || sudo apt-get install -y libgtk-3-0t64
+
+  sudo apt-get install -y libasound2 || sudo apt-get install -y libasound2t64
 
   # GPG キー & リポジトリ定義
   wget -qO - https://hub.unity3d.com/linux/keys/public \
