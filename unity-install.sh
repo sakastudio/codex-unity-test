@@ -23,17 +23,17 @@ echo ">> Installing runtime dependencies & Unity Hub ..."
 sudo apt-get update
 
 # ★ GTK と ALSA は Ubuntu 24.04 以降で t64 名に変更されたので動的判定
-if apt-cache policy libgtk-3-0t64 2>/dev/null | grep -q Candidate; then
-  GTK_PKG=libgtk-3-0t64
-else
-  GTK_PKG=libgtk-3-0
-fi
+choose_pkg() {
+  if apt-cache show "${1}t64" 2>/dev/null | grep -q '^Version:'; then
+    echo "${1}t64"
+  else
+    echo "${1}"
+  fi
+}
 
-if apt-cache policy libasound2t64 2>/dev/null | grep -q Candidate; then
-  ALSA_PKG=libasound2t64
-else
-  ALSA_PKG=libasound2
-fi
+GTK_PKG=$(choose_pkg libgtk-3-0)
+ALSA_PKG=$(choose_pkg libasound2)
+
 
 
 sudo apt-get install -y wget gpg ca-certificates libnss3 xvfb dbus-user-session \
@@ -88,7 +88,7 @@ run_hub() {
 
 args=(--headless install --version "$UNITY_VERSION")
 if [[ -n "$UNITY_MODULES" ]]; then
-  for m in $UNITY_MODULES; do args+=( -m "$m" ); done
+  for m in $UNITY_MODULES; do args=( -m "$m" ); done
 fi
 
 run_hub "${args[@]}"
