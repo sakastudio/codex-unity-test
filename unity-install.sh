@@ -35,7 +35,7 @@ GTK_PKG=$(choose_pkg libgtk-3-0)
 ALSA_PKG=$(choose_pkg libasound2)
 
 sudo apt-get install -y \
-  wget gpg ca-certificates libnss3 xvfb dbus-user-session \
+  wget gpg ca-certificates libnss3 xvfb dbus-user-session openssl \
   "$GTK_PKG" "$ALSA_PKG" \
   mitmproxy                           # mitmproxy も同時に入れる
 
@@ -59,6 +59,35 @@ if [[ -f "$MITM_CA" ]]; then
   sudo cp "$MITM_CA" /usr/local/share/ca-certificates/mitmproxy-ca.crt
   sudo update-ca-certificates
   export NODE_EXTRA_CA_CERTS="/usr/local/share/ca-certificates/mitmproxy-ca.crt"
+fi
+
+# ────────────────────────────────────────────────────────────────
+# 追加: HTTPS_PROXY が設定されている場合、実際に使われている
+#       ルート CA を openssl s_client で抽出して trust store へ登録
+# ────────────────────────────────────────────────────────────────
+if [[ -n "${HTTPS_PROXY:-}" ]]; then
+  echo ">> Attempting to extract proxy root CA via OpenSSL"
+  PROXY=${HTTPS_PROXY#http://}          # s_client は scheme 不要
+  TMP_CA=$(mktemp)
+
+  openssl s_client -showcerts \
+    -connect hub.unity3d.com:443 \
+    -proxy "${PROXY}" </dev/null 2>/dev/null \
+  | awk 'BEGIN{cert="";in=0}
+         /-----BEGIN CERT/{cert=$0; in=1; next}
+         in{cert=cert"\n"$0}
+         /-----END CERT/{last=cert; in=0}
+         END{print last}' > "$TMP_CA"
+
+  if grep -q "BEGIN CERTIFICATE" "$TMP_CA"; then
+    echo ">> Installing proxy root CA to system trust store"
+    sudo cp "$TMP_CA" /usr/local/share/ca-certificates/proxy-root-ca.crt
+    sudo update-ca-certificates
+    export NODE_EXTRA_CA_CERTS="/usr/local/share/ca-certificates/proxy-root-ca.crt:${NODE_EXTRA_CA_CERTS:-}"
+  else
+    echo "!! Failed to extract proxy root CA – continuing without it"
+  fi
+  rm -f "$TMP_CA"
 fi
 
 # オプション: 企業プロキシがあるなら HTTPS_PROXY を事前に set しておく
