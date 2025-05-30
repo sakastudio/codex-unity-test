@@ -42,12 +42,17 @@ sudo apt-get install -y \
 # ────────────────────────────────────────────────────────────────
 # 2) mitmproxy ルート CA を生成 → システム & Electron 登録
 # ────────────────────────────────────────────────────────────────
+
 MITM_CA="$HOME/.mitmproxy/mitmproxy-ca-cert.pem"
 if [[ ! -f "$MITM_CA" ]]; then
-  echo ">> Generating mitmproxy root certificate..."
-  # 初回のみ ~/.mitmproxy に CA を生成
-  mitmdump --help >/dev/null 2>&1
+  echo ">> Generating mitmproxy root certificate (short-lived proxy)..."
+  # mitmdump を 5 秒だけ起動して CA を生成させる
+  ( mitmdump -q \
+      --listen-host 127.0.0.1 --listen-port 8085 \
+      --set block_global=false \
+      & MDPID=$!; sleep 5; kill "$MDPID" >/dev/null 2>&1 ) || true
 fi
+
 
 if [[ -f "$MITM_CA" ]]; then
   echo ">> Installing mitmproxy root CA to system trust store"
