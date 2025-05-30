@@ -3,7 +3,7 @@
 #   • Handles lib* t64 packages (24.04+)
 #   • Wraps Unity Hub in dbus-run-session + xvfb
 #   • Installs mitmproxy, generates root CA, and registers it system-wide
-#   • Supports corporate proxy via HTTPS_PROXY / HTTP_PROXY
+#   • Extracts corporate-proxy root CA automatically (HTTPS_PROXY / HTTP_PROXY)
 
 set -euo pipefail
 
@@ -14,20 +14,20 @@ set -euo pipefail
 : "${UNITY_PASSWORD:?Error: UNITY_PASSWORD is not set}"
 : "${UNITY_VERSION:?Error: UNITY_VERSION is not set}"
 
-UNITY_MODULES=${UNITY_MODULES:-""}          # e.g. "android webgl"
-UNITY_SERIAL=${UNITY_SERIAL:-""}            # Pro/Plus serial (empty = Personal)
+UNITY_MODULES=${UNITY_MODULES:-""}           # 例: "android webgl"
+UNITY_SERIAL=${UNITY_SERIAL:-""}             # Pro/Plus serial (Personal は空で OK)
 UNITY_INSTALL_PATH=${UNITY_INSTALL_PATH:-"/opt/unity"}
 
 # ────────────────────────────────────────────────────────────────
-# 1) 依存パッケージの導入（Ubuntu 22.04 / 24.04 両対応）
+# 1) 依存パッケージ導入（Ubuntu 22.04 / 24.04 両対応）
 # ────────────────────────────────────────────────────────────────
 sudo apt-get update -y
 
-choose_pkg() {                    # $1 = base name (libgtk-3-0 / libasound2)
+choose_pkg() {                              # $1 = libgtk-3-0 / libasound2
   if apt-cache show "${1}t64" 2>/dev/null | grep -q '^Version:'; then
-    echo "${1}t64"               # Ubuntu 24.04+
+    echo "${1}t64"                          # Ubuntu 24.04 以降
   else
-    echo "${1}"                  # Ubuntu 22.04-
+    echo "${1}"                             # Ubuntu 22.04 以前
   fi
 }
 
@@ -37,22 +37,17 @@ ALSA_PKG=$(choose_pkg libasound2)
 sudo apt-get install -y \
   wget gpg ca-certificates libnss3 xvfb dbus-user-session openssl \
   "$GTK_PKG" "$ALSA_PKG" \
-  mitmproxy                           # mitmproxy も同時に入れる
+  mitmproxy                                   # mitmproxy も導入
 
 # ────────────────────────────────────────────────────────────────
 # 2) mitmproxy ルート CA を生成 → システム & Electron 登録
 # ────────────────────────────────────────────────────────────────
-
 MITM_CA="$HOME/.mitmproxy/mitmproxy-ca-cert.pem"
 if [[ ! -f "$MITM_CA" ]]; then
-  echo ">> Generating mitmproxy root certificate (short-lived proxy)..."
-  # mitmdump を 5 秒だけ起動して CA を生成させる
-  ( mitmdump -q \
-      --listen-host 127.0.0.1 --listen-port 8085 \
-      --set block_global=false \
-      & MDPID=$!; sleep 5; kill "$MDPID" >/dev/null 2>&1 ) || true
+  echo ">> Generating mitmproxy root certificate (short-lived proxy)…"
+  ( mitmdump -q --listen-host 127.0.0.1 --listen-port 8085 \
+    --set block_global=false & MDPID=$! ; sleep 5 ; kill "$MDPID" >/dev/null 2>&1 ) || true
 fi
-
 
 if [[ -f "$MITM_CA" ]]; then
   echo ">> Installing mitmproxy root CA to system trust store"
@@ -62,22 +57,19 @@ if [[ -f "$MITM_CA" ]]; then
 fi
 
 # ────────────────────────────────────────────────────────────────
-# 追加: HTTPS_PROXY が設定されている場合、実際に使われている
-#       ルート CA を openssl s_client で抽出して trust store へ登録
+# 3) HTTPS_PROXY があれば実際の proxy ルート CA を自動抽出して登録
 # ────────────────────────────────────────────────────────────────
 if [[ -n "${HTTPS_PROXY:-}" ]]; then
   echo ">> Attempting to extract proxy root CA via OpenSSL"
-  PROXY=${HTTPS_PROXY#http://}          # s_client は scheme 不要
+  PROXY=${HTTPS_PROXY#http://}              # scheme を除去
   TMP_CA=$(mktemp)
 
-  openssl s_client -showcerts \
-    -connect hub.unity3d.com:443 \
-    -proxy "${PROXY}" </dev/null 2>/dev/null \
-  | awk 'BEGIN{cert="";in=0}
-         /-----BEGIN CERT/{cert=$0; in=1; next}
-         in{cert=cert"\n"$0}
-         /-----END CERT/{last=cert; in=0}
-         END{print last}' > "$TMP_CA"
+  # ── ルート CA だけを抽出（sed + tac で安全に） ──
+  openssl s_client -showcerts -servername hub.unity3d.com \
+      -connect hub.unity3d.com:443 -proxy "${PROXY}" </dev/null 2>/dev/null |
+  sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' |
+  tac | sed -n '/-----END CERTIFICATE-----/,/-----BEGIN CERTIFICATE-----/p' | tac \
+  > "$TMP_CA"
 
   if grep -q "BEGIN CERTIFICATE" "$TMP_CA"; then
     echo ">> Installing proxy root CA to system trust store"
@@ -90,20 +82,20 @@ if [[ -n "${HTTPS_PROXY:-}" ]]; then
   rm -f "$TMP_CA"
 fi
 
-# オプション: 企業プロキシがあるなら HTTPS_PROXY を事前に set しておく
+# 企業プロキシ: HTTP(S)_PROXY / NO_PROXY を Unity Hub 実行前に設定
 if [[ -n "${HTTPS_PROXY:-}" ]]; then
   export HTTP_PROXY="$HTTPS_PROXY"
   export NO_PROXY="localhost,127.0.0.1"
 fi
 
 # ────────────────────────────────────────────────────────────────
-# 3) Unity Hub のインストール（未インストール時のみ）
+# 4) Unity Hub のインストール（未インストール時のみ）
 # ────────────────────────────────────────────────────────────────
 if ! command -v unityhub &>/dev/null; then
-  echo ">> Installing Unity Hub..."
+  echo ">> Installing Unity Hub…"
   wget -qO - https://hub.unity3d.com/linux/keys/public \
-    | gpg --dearmor \
-    | sudo tee /usr/share/keyrings/Unity_Technologies_ApS.gpg >/dev/null
+      | gpg --dearmor \
+      | sudo tee /usr/share/keyrings/Unity_Technologies_ApS.gpg >/dev/null
 
   sudo tee /etc/apt/sources.list.d/unityhub.sources >/dev/null <<'EOF'
 Types: deb
@@ -118,7 +110,7 @@ EOF
 fi
 
 # ────────────────────────────────────────────────────────────────
-# 4) system D-Bus が無いコンテナ用の暫定バス起動
+# 5) system D-Bus が無いコンテナ用の暫定バス起動
 # ────────────────────────────────────────────────────────────────
 if [[ ! -S /run/dbus/system_bus_socket ]]; then
   echo ">> Starting ad-hoc system D-Bus"
@@ -126,17 +118,17 @@ if [[ ! -S /run/dbus/system_bus_socket ]]; then
 fi
 
 # ────────────────────────────────────────────────────────────────
-# 5) Hub EULA 同意ファイルを作成
+# 6) Hub EULA 同意ファイル
 # ────────────────────────────────────────────────────────────────
 mkdir -p "$HOME/.config/Unity Hub"
-echo '{"accepted":[{"version":"3"}]}' >"$HOME/.config/Unity Hub/eulaAccepted"
+echo '{"accepted":[{"version":"3"}]}' > "$HOME/.config/Unity Hub/eulaAccepted"
 
 # ────────────────────────────────────────────────────────────────
-# 6) Unity Editor のインストール
+# 7) Unity Editor のインストール
 # ────────────────────────────────────────────────────────────────
-echo ">> Installing Unity Editor $UNITY_VERSION ..."
+echo ">> Installing Unity Editor $UNITY_VERSION …"
 
-export ELECTRON_DISABLE_GPU=true   # GPU 無しでもソフトレンダに
+export ELECTRON_DISABLE_GPU=true            # GPU 無しでも OK
 
 run_hub() {
   dbus-run-session -- \
@@ -148,17 +140,16 @@ args=(--headless install --version "$UNITY_VERSION")
 if [[ -n "$UNITY_MODULES" ]]; then
   for m in $UNITY_MODULES; do args+=( -m "$m" ); done
 fi
-
 run_hub "${args[@]}"
 
 # ────────────────────────────────────────────────────────────────
-# 7) （任意）ライセンス自動アクティベーション
+# 8) （任意）ライセンス自動アクティベーション
 # ────────────────────────────────────────────────────────────────
 if [[ -n "$UNITY_SERIAL" ]]; then
   EDITOR="$HOME/Unity/Hub/Editor/$UNITY_VERSION/Editor/Unity"
   [[ -x $EDITOR ]] || EDITOR="$UNITY_INSTALL_PATH/Hub/Editor/$UNITY_VERSION/Editor/Unity"
   if [[ -x $EDITOR ]]; then
-    echo ">> Activating license ..."
+    echo ">> Activating license …"
     dbus-run-session -- xvfb-run --auto-servernum \
       "$EDITOR" -quit -batchmode -nographics \
       -serial "$UNITY_SERIAL" \
