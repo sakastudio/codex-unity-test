@@ -101,24 +101,13 @@ echo ">> [STEP 3] Proxy root CA configuration completed"
 # 4) Unity Hub のインストール（未インストール時のみ / フォールバックあり）
 # ────────────────────────────────────────────────────────────────
 echo ">> [STEP 4] Starting Unity Hub installation"
-install_hub_appimage() {                    # ← フォールバック関数
-  echo ">> Falling back to direct UnityHub.AppImage download"
-  HUB_URL="https://public-cdn.cloud.unity3d.com/hub/prod/UnityHub.AppImage"
-  sudo wget -qO /usr/local/bin/unityhub "$HUB_URL"
-  sudo chmod +x /usr/local/bin/unityhub
-  echo ">> Unity Hub AppImage installed to /usr/local/bin/unityhub"
-}
-
+# Unity Hub が未インストールならリポジトリ追加 → インストール
 if ! command -v unityhub &>/dev/null; then
-  echo ">> Unity Hub is not installed. Starting installation"
-
-  set +e
-  {
-    wget -qO - https://hub.unity3d.com/linux/keys/public \
+  wget -qO - https://hub.unity3d.com/linux/keys/public \
       | gpg --dearmor \
       | sudo tee /usr/share/keyrings/Unity_Technologies_ApS.gpg >/dev/null
 
-    sudo tee /etc/apt/sources.list.d/unityhub.sources >/dev/null <<'EOF'
+  sudo tee /etc/apt/sources.list.d/unityhub.sources >/dev/null <<'EOF'
 Types: deb
 URIs: https://hub.unity3d.com/linux/repos/deb
 Suites: stable
@@ -126,19 +115,11 @@ Components: main
 Signed-By: /usr/share/keyrings/Unity_Technologies_ApS.gpg
 EOF
 
-    sudo apt-get update -y
-    sudo apt-get install -y unityhub
-  }
-  HUB_STATUS=$?
-  set -e
-
-  if [[ $HUB_STATUS -ne 0 ]]; then
-    echo "!! apt install unityhub failed (${HUB_STATUS}) – switching to AppImage"
-    install_hub_appimage
-  fi
-else
-  echo ">> Unity Hub is already installed"
+  sudo apt-get update
+  sudo apt-get install -y unityhub
 fi
+
+
 echo ">> [STEP 4] Unity Hub installation completed"
 
 # ────────────────────────────────────────────────────────────────
