@@ -1,49 +1,75 @@
 #!/usr/bin/env bash
+# Fully-automated Unity Hub & Editor installer for headless Ubuntu
+#   • Handles lib* t64 packages (24.04+)
+#   • Wraps Unity Hub in dbus-run-session + xvfb
+#   • Installs mitmproxy, generates root CA, and registers it system-wide
+#   • Supports corporate proxy via HTTPS_PROXY / HTTP_PROXY
+
 set -euo pipefail
 
 # ────────────────────────────────────────────────────────────────
-# 0) ユーザー設定：必須／任意環境変数
+# 0) 必須 / 任意環境変数
 # ────────────────────────────────────────────────────────────────
 : "${UNITY_EMAIL:?Error: UNITY_EMAIL is not set}"
 : "${UNITY_PASSWORD:?Error: UNITY_PASSWORD is not set}"
 : "${UNITY_VERSION:?Error: UNITY_VERSION is not set}"
 
-UNITY_MODULES=${UNITY_MODULES:-""}          # 例: "android webgl"
-UNITY_SERIAL=${UNITY_SERIAL:-""}            # Pro/Plus シリアル (Personal は空で OK)
+UNITY_MODULES=${UNITY_MODULES:-""}          # e.g. "android webgl"
+UNITY_SERIAL=${UNITY_SERIAL:-""}            # Pro/Plus serial (empty = Personal)
 UNITY_INSTALL_PATH=${UNITY_INSTALL_PATH:-"/opt/unity"}
 
-# ★ MITM プロキシ等でルート証明書を追加したい場合はパスを渡す
-MITM_CA_PATH=${MITM_CA_PATH:-""}            # 例: "./corp-root-ca.pem"
-
 # ────────────────────────────────────────────────────────────────
-# 1) 依存パッケージ Unity Hub のインストール
+# 1) 依存パッケージの導入（Ubuntu 22.04 / 24.04 両対応）
 # ────────────────────────────────────────────────────────────────
-echo ">> Installing runtime dependencies & Unity Hub ..."
+sudo apt-get update -y
 
-sudo apt-get update
-
-# ★ GTK と ALSA は Ubuntu 24.04 以降で t64 名に変更されたので動的判定
-choose_pkg() {
+choose_pkg() {                    # $1 = base name (libgtk-3-0 / libasound2)
   if apt-cache show "${1}t64" 2>/dev/null | grep -q '^Version:'; then
-    echo "${1}t64"
+    echo "${1}t64"               # Ubuntu 24.04+
   else
-    echo "${1}"
+    echo "${1}"                  # Ubuntu 22.04-
   fi
 }
 
 GTK_PKG=$(choose_pkg libgtk-3-0)
 ALSA_PKG=$(choose_pkg libasound2)
 
+sudo apt-get install -y \
+  wget gpg ca-certificates libnss3 xvfb dbus-user-session \
+  "$GTK_PKG" "$ALSA_PKG" \
+  mitmproxy                           # mitmproxy も同時に入れる
 
+# ────────────────────────────────────────────────────────────────
+# 2) mitmproxy ルート CA を生成 → システム & Electron 登録
+# ────────────────────────────────────────────────────────────────
+MITM_CA="$HOME/.mitmproxy/mitmproxy-ca-cert.pem"
+if [[ ! -f "$MITM_CA" ]]; then
+  echo ">> Generating mitmproxy root certificate..."
+  # 初回のみ ~/.mitmproxy に CA を生成
+  mitmdump --help >/dev/null 2>&1
+fi
 
-sudo apt-get install -y wget gpg ca-certificates libnss3 xvfb dbus-user-session \
-                        "$GTK_PKG" "$ALSA_PKG"
+if [[ -f "$MITM_CA" ]]; then
+  echo ">> Installing mitmproxy root CA to system trust store"
+  sudo cp "$MITM_CA" /usr/local/share/ca-certificates/mitmproxy-ca.crt
+  sudo update-ca-certificates
+  export NODE_EXTRA_CA_CERTS="/usr/local/share/ca-certificates/mitmproxy-ca.crt"
+fi
 
-# Unity Hub が未インストールならリポジトリ追加 → インストール
+# オプション: 企業プロキシがあるなら HTTPS_PROXY を事前に set しておく
+if [[ -n "${HTTPS_PROXY:-}" ]]; then
+  export HTTP_PROXY="$HTTPS_PROXY"
+  export NO_PROXY="localhost,127.0.0.1"
+fi
+
+# ────────────────────────────────────────────────────────────────
+# 3) Unity Hub のインストール（未インストール時のみ）
+# ────────────────────────────────────────────────────────────────
 if ! command -v unityhub &>/dev/null; then
+  echo ">> Installing Unity Hub..."
   wget -qO - https://hub.unity3d.com/linux/keys/public \
-      | gpg --dearmor \
-      | sudo tee /usr/share/keyrings/Unity_Technologies_ApS.gpg >/dev/null
+    | gpg --dearmor \
+    | sudo tee /usr/share/keyrings/Unity_Technologies_ApS.gpg >/dev/null
 
   sudo tee /etc/apt/sources.list.d/unityhub.sources >/dev/null <<'EOF'
 Types: deb
@@ -53,32 +79,30 @@ Components: main
 Signed-By: /usr/share/keyrings/Unity_Technologies_ApS.gpg
 EOF
 
-  sudo apt-get update
+  sudo apt-get update -y
   sudo apt-get install -y unityhub
 fi
 
 # ────────────────────────────────────────────────────────────────
-# 2) 追加 CA 証明書 (MITM / 社内プロキシ向け) ★
+# 4) system D-Bus が無いコンテナ用の暫定バス起動
 # ────────────────────────────────────────────────────────────────
-if [[ -n "$MITM_CA_PATH" && -f "$MITM_CA_PATH" ]]; then
-  echo ">> Installing custom root CA: $MITM_CA_PATH"
-  sudo cp "$MITM_CA_PATH" "/usr/local/share/ca-certificates/$(basename "$MITM_CA_PATH").crt"
-  sudo update-ca-certificates
-  export NODE_EXTRA_CA_CERTS="/usr/local/share/ca-certificates/$(basename "$MITM_CA_PATH").crt"
+if [[ ! -S /run/dbus/system_bus_socket ]]; then
+  echo ">> Starting ad-hoc system D-Bus"
+  sudo dbus-daemon --system --fork --nopidfile
 fi
 
 # ────────────────────────────────────────────────────────────────
-# 3) Unity Hub の EULA 同意を書き込み
+# 5) Hub EULA 同意ファイルを作成
 # ────────────────────────────────────────────────────────────────
 mkdir -p "$HOME/.config/Unity Hub"
 echo '{"accepted":[{"version":"3"}]}' >"$HOME/.config/Unity Hub/eulaAccepted"
 
 # ────────────────────────────────────────────────────────────────
-# 4) Unity Editor のインストール (xvfb D-Bus ラップ) ★
+# 6) Unity Editor のインストール
 # ────────────────────────────────────────────────────────────────
 echo ">> Installing Unity Editor $UNITY_VERSION ..."
 
-export ELECTRON_DISABLE_GPU=true   # GPU が無い VM でもソフトレンダに
+export ELECTRON_DISABLE_GPU=true   # GPU 無しでもソフトレンダに
 
 run_hub() {
   dbus-run-session -- \
@@ -88,13 +112,13 @@ run_hub() {
 
 args=(--headless install --version "$UNITY_VERSION")
 if [[ -n "$UNITY_MODULES" ]]; then
-  for m in $UNITY_MODULES; do args=( -m "$m" ); done
+  for m in $UNITY_MODULES; do args+=( -m "$m" ); done
 fi
 
 run_hub "${args[@]}"
 
 # ────────────────────────────────────────────────────────────────
-# 5) (オプション) ライセンス自動アクティベーション
+# 7) （任意）ライセンス自動アクティベーション
 # ────────────────────────────────────────────────────────────────
 if [[ -n "$UNITY_SERIAL" ]]; then
   EDITOR="$HOME/Unity/Hub/Editor/$UNITY_VERSION/Editor/Unity"
