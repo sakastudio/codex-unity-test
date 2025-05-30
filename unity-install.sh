@@ -4,6 +4,7 @@
 #   • Wraps Unity Hub in dbus-run-session + xvfb
 #   • Installs mitmproxy, generates root CA, and registers it system-wide
 #   • Extracts corporate-proxy root CA automatically (HTTPS_PROXY / HTTP_PROXY)
+#   • Falls back to UnityHub.AppImage if the apt repository is blocked
 
 set -euo pipefail
 
@@ -36,8 +37,9 @@ ALSA_PKG=$(choose_pkg libasound2)
 
 sudo apt-get install -y \
   wget gpg ca-certificates libnss3 xvfb dbus-user-session openssl \
+  libfuse2 \                               # ← AppImage 実行用に追加
   "$GTK_PKG" "$ALSA_PKG" \
-  mitmproxy                                   # mitmproxy も導入
+  mitmproxy
 
 # ────────────────────────────────────────────────────────────────
 # 2) mitmproxy ルート CA を生成 → システム & Electron 登録
@@ -46,7 +48,7 @@ MITM_CA="$HOME/.mitmproxy/mitmproxy-ca-cert.pem"
 if [[ ! -f "$MITM_CA" ]]; then
   echo ">> Generating mitmproxy root certificate (short-lived proxy)…"
   ( mitmdump -q --listen-host 127.0.0.1 --listen-port 8085 \
-    --set block_global=false & MDPID=$! ; sleep 5 ; kill "$MDPID" >/dev/null 2>&1 ) || true
+      --set block_global=false & MDPID=$! ; sleep 5 ; kill "$MDPID" >/dev/null 2>&1 ) || true
 fi
 
 if [[ -f "$MITM_CA" ]]; then
@@ -64,12 +66,11 @@ if [[ -n "${HTTPS_PROXY:-}" ]]; then
   PROXY=${HTTPS_PROXY#http://}              # scheme を除去
   TMP_CA=$(mktemp)
 
-  # ── ルート CA だけを抽出（sed + tac で安全に） ──
   openssl s_client -showcerts -servername hub.unity3d.com \
       -connect hub.unity3d.com:443 -proxy "${PROXY}" </dev/null 2>/dev/null |
   sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' |
   tac | sed -n '/-----END CERTIFICATE-----/,/-----BEGIN CERTIFICATE-----/p' | tac \
-  > "$TMP_CA"
+    > "$TMP_CA"
 
   if grep -q "BEGIN CERTIFICATE" "$TMP_CA"; then
     echo ">> Installing proxy root CA to system trust store"
@@ -89,15 +90,26 @@ if [[ -n "${HTTPS_PROXY:-}" ]]; then
 fi
 
 # ────────────────────────────────────────────────────────────────
-# 4) Unity Hub のインストール（未インストール時のみ）
+# 4) Unity Hub のインストール（未インストール時のみ / フォールバックあり）
 # ────────────────────────────────────────────────────────────────
+install_hub_appimage() {                    # ← フォールバック関数
+  echo ">> Falling back to direct UnityHub.AppImage download"
+  HUB_URL="https://public-cdn.cloud.unity3d.com/hub/prod/UnityHub.AppImage"
+  sudo wget -qO /usr/local/bin/unityhub "$HUB_URL"
+  sudo chmod +x /usr/local/bin/unityhub
+  echo ">> Unity Hub AppImage installed to /usr/local/bin/unityhub"
+}
+
 if ! command -v unityhub &>/dev/null; then
   echo ">> Installing Unity Hub…"
-  wget -qO - https://hub.unity3d.com/linux/keys/public \
+
+  set +e
+  {
+    wget -qO - https://hub.unity3d.com/linux/keys/public \
       | gpg --dearmor \
       | sudo tee /usr/share/keyrings/Unity_Technologies_ApS.gpg >/dev/null
 
-  sudo tee /etc/apt/sources.list.d/unityhub.sources >/dev/null <<'EOF'
+    sudo tee /etc/apt/sources.list.d/unityhub.sources >/dev/null <<'EOF'
 Types: deb
 URIs: https://hub.unity3d.com/linux/repos/deb
 Suites: stable
@@ -105,8 +117,16 @@ Components: main
 Signed-By: /usr/share/keyrings/Unity_Technologies_ApS.gpg
 EOF
 
-  sudo apt-get update -y
-  sudo apt-get install -y unityhub
+    sudo apt-get update -y
+    sudo apt-get install -y unityhub
+  }
+  HUB_STATUS=$?
+  set -e
+
+  if [[ $HUB_STATUS -ne 0 ]]; then
+    echo "!! apt install unityhub failed (${HUB_STATUS}) – switching to AppImage"
+    install_hub_appimage
+  fi
 fi
 
 # ────────────────────────────────────────────────────────────────
