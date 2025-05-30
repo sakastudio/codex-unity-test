@@ -16,15 +16,25 @@ UNITY_INSTALL_PATH=${UNITY_INSTALL_PATH:-"/opt/unity"}
 MITM_CA_PATH=${MITM_CA_PATH:-""}            # 例: "./corp-root-ca.pem"
 
 # ────────────────────────────────────────────────────────────────
-# 1) 依存パッケージ + Unity Hub のインストール
+# 1) 依存パッケージ Unity Hub のインストール
 # ────────────────────────────────────────────────────────────────
 echo ">> Installing runtime dependencies & Unity Hub ..."
 
 sudo apt-get update
 
 # ★ GTK と ALSA は Ubuntu 24.04 以降で t64 名に変更されたので動的判定
-if apt-cache show libgtk-3-0 >/dev/null 2>&1; then GTK_PKG=libgtk-3-0; else GTK_PKG=libgtk-3-0t64; fi
-if apt-cache show libasound2 >/dev/null 2>&1; then ALSA_PKG=libasound2; else ALSA_PKG=libasound2t64; fi
+if apt-cache policy libgtk-3-0t64 2>/dev/null | grep -q Candidate; then
+  GTK_PKG=libgtk-3-0t64
+else
+  GTK_PKG=libgtk-3-0
+fi
+
+if apt-cache policy libasound2t64 2>/dev/null | grep -q Candidate; then
+  ALSA_PKG=libasound2t64
+else
+  ALSA_PKG=libasound2
+fi
+
 
 sudo apt-get install -y wget gpg ca-certificates libnss3 xvfb dbus-user-session \
                         "$GTK_PKG" "$ALSA_PKG"
@@ -64,7 +74,7 @@ mkdir -p "$HOME/.config/Unity Hub"
 echo '{"accepted":[{"version":"3"}]}' >"$HOME/.config/Unity Hub/eulaAccepted"
 
 # ────────────────────────────────────────────────────────────────
-# 4) Unity Editor のインストール (xvfb + D-Bus ラップ) ★
+# 4) Unity Editor のインストール (xvfb D-Bus ラップ) ★
 # ────────────────────────────────────────────────────────────────
 echo ">> Installing Unity Editor $UNITY_VERSION ..."
 
