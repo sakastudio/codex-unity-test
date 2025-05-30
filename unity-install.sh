@@ -22,7 +22,7 @@ if ! command -v unityhub &>/dev/null; then
   sudo apt-get update
   # ★ Electron が動く最低限のライブラリ + xvfb
   sudo apt-get install -y wget gpg ca-certificates \
-                          libgtk-3-0 libnss3 libasound2 \
+                          libgtk-3-0t64 libnss3 libasound2 \
                           xvfb
 
   # GPG キー & リポジトリ定義
