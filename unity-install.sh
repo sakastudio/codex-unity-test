@@ -39,7 +39,6 @@ ALSA_PKG=$(choose_pkg libasound2)
 echo ">> [STEP 1] Installing packages..."
 sudo apt-get install -y \
   wget gpg ca-certificates libnss3 xvfb dbus-user-session openssl \
-  libfuse2t64 \                               # ← AppImage 実行用に追加
   "$GTK_PKG" "$ALSA_PKG" \
   mitmproxy
 echo ">> [STEP 1] Dependency package installation completed"
